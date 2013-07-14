@@ -1,0 +1,299 @@
+/*
+ * util.h
+ * 
+ * This file is a part of NSIS.
+ * 
+ * Copyright (C) 1999-2013 Nullsoft and Contributors
+ * 
+ * Licensed under the zlib/libpng license (the "License");
+ * you may not use this file except in compliance with the License.
+ * 
+ * Licence details can be found in the file COPYING.
+ * 
+ * This software is provided 'as-is', without any express or implied
+ * warranty.
+ *
+ * Unicode support by Jim Park -- 08/10/2007
+ */
+
+#ifndef _UTIL_H_
+#define _UTIL_H_
+
+#include "tstring.h" // for std::string
+
+#include "boost/scoped_ptr.hpp" // for boost::scoped_ptr
+#include "ResourceEditor.h"
+
+#ifndef _WIN32
+#  include <iconv.h>
+#  include <stdio.h>
+#  include <unistd.h>
+#endif
+
+#include <stdarg.h>
+
+
+extern double my_wtof(const wchar_t *str);
+extern unsigned int my_strncpy(TCHAR*Dest, const TCHAR*Src, unsigned int cchMax);
+
+// Adds the bitmap in filename using resource editor re as id id.
+// If width or height are specified it will also make sure the bitmap is in that size
+int update_bitmap(CResourceEditor* re, WORD id, const TCHAR* filename, int width=0, int height=0, int maxbpp=0);
+
+size_t my_strftime(TCHAR *s, size_t max, const TCHAR  *fmt, const struct tm *tm);
+
+bool GetDLLVersion(const tstring& filepath, DWORD& high, DWORD& low);
+
+tstring get_full_path(const tstring& path);
+tstring get_dir_name(const tstring& path);
+tstring get_file_name(const tstring& path);
+tstring get_executable_dir(const TCHAR *argv0);
+tstring remove_file_extension(const tstring& path);
+tstring lowercase(const tstring&);
+
+tstring get_string_prefix(const tstring& str, const tstring& separator);
+tstring get_string_suffix(const tstring& str, const tstring& separator);
+
+size_t ExpandoStrFmtVaList(wchar_t*Stack, size_t cchStack, wchar_t**ppMalloc, const wchar_t*FmtStr, va_list Args);
+
+template<typename T, size_t S> class ExpandoString {
+  T m_stack[S ? S : 1], *m_heap;
+public:
+  ExpandoString() : m_heap(0) {}
+  ~ExpandoString() { free(m_heap); }
+  void Reserve(size_t cch)
+  {
+    if (S && cch <= S) return ;
+    void *p = realloc(m_heap, cch * sizeof(T));
+    if (!p) throw std::bad_alloc();
+    m_heap = (T*) p;
+  }
+  size_t StrFmt(const T*FmtStr, va_list Args, bool throwonerr = true)
+  {
+    size_t n = ExpandoStrFmtVaList(m_stack, COUNTOF(m_stack), &m_heap, FmtStr, Args);
+    if (throwonerr && !n && *FmtStr) throw std::bad_alloc();
+    return n;
+  }
+  T* GetPtr() { return m_heap ? m_heap : m_stack; }
+  operator T*() { return GetPtr(); }
+};
+
+int sane_system(const TCHAR *command);
+
+void PrintColorFmtMsg(unsigned int type, const TCHAR *fmtstr, va_list args);
+void FlushOutputAndResetPrintColor();
+#ifdef _WIN32
+#ifdef _UNICODE
+int RunChildProcessRedirected(LPCWSTR cmdprefix, LPCWSTR cmdmain);
+#ifdef MAKENSIS
+typedef struct {
+  HANDLE hNative;
+  FILE*hCRT;
+  WORD cp;
+  signed char mode; // -1 = redirected, 0 = unknown, 1 = console
+  bool mustwritebom;
+} WINSIO_OSDATA;
+inline bool WinStdIO_IsConsole(WINSIO_OSDATA&osd) { return osd.mode > 0; }
+inline bool WinStdIO_IsRedirected(WINSIO_OSDATA&osd) { return osd.mode < 0; }
+bool WINAPI WinStdIO_OStreamInit(WINSIO_OSDATA&osd, FILE*strm, WORD cp, int bom = 1);
+bool WINAPI WinStdIO_OStreamWrite(WINSIO_OSDATA&osd, const wchar_t *Str, UINT cch = -1);
+int WINAPI WinStdIO_vfwprintf(FILE*strm, const wchar_t*Fmt, va_list val);
+int WinStdIO_fwprintf(FILE*strm, const wchar_t*Fmt, ...);
+int WinStdIO_wprintf(const wchar_t*Fmt, ...);
+#include <tchar.h> // Make sure we include the CRTs tchar.h in case it is pulled in by something else later.
+// We don't hook fflush since the native handle is only used with WriteConsoleW
+#undef _vsntprintf
+#define _vsntprintf Error: TODO
+#undef _tprintf
+#define _tprintf WinStdIO_wprintf
+#undef _ftprintf
+#define _ftprintf WinStdIO_fwprintf
+#undef _vftprintf
+#define _vftprintf WinStdIO_vfwprintf
+#endif // ~MAKENSIS
+#endif // ~_UNICODE
+#define ResetPrintColor() FlushOutputAndResetPrintColor() // For reset ONLY use PrintColorFmtMsg(0,NULL ...
+#define SetPrintColorWARN() PrintColorFmtMsg(1|0x10, NULL, (va_list)NULL)
+#define SetPrintColorERR() PrintColorFmtMsg(2|0x10, NULL, (va_list)NULL)
+#else
+#define ResetPrintColor()
+#define SetPrintColorWARN()
+#define SetPrintColorERR()
+#endif // ~_WIN32
+inline void PrintColorFmtMsg_WARN(const TCHAR *fmtstr, ...)
+{
+  va_list val;
+  va_start(val,fmtstr);
+  PrintColorFmtMsg(1, fmtstr, val);
+  va_end(val);
+}
+inline void PrintColorFmtMsg_ERR(const TCHAR *fmtstr, ...)
+{
+  va_list val;
+  va_start(val,fmtstr);
+  PrintColorFmtMsg(2, fmtstr, val);
+  va_end(val);
+}
+
+
+
+#ifndef _WIN32
+// iconv const inconsistency workaround by Alexandre Oliva
+template <typename T>
+inline size_t nsis_iconv_adaptor
+  (size_t (*iconv_func)(iconv_t, T, size_t *, char**,size_t*),
+  iconv_t cd, char **inbuf, size_t *inbytesleft,
+  char **outbuf, size_t *outbytesleft)
+{
+  return iconv_func (cd, (T)inbuf, inbytesleft, outbuf, outbytesleft);
+}
+
+bool nsis_iconv_reallociconv(iconv_t CD, char**In, size_t*cbInLeft, char**Mem, size_t&cbConverted);
+
+class iconvdescriptor {
+  iconv_t m_cd;
+public:
+  iconvdescriptor(iconv_t cd = (iconv_t)-1) : m_cd(cd) {}
+  ~iconvdescriptor() { Close(); }
+  void Close()
+  {
+    if ((iconv_t)-1 != m_cd)
+    {
+      iconv_close(m_cd);
+      m_cd = (iconv_t)-1;
+    }
+  }
+  bool Open(const char*tocode, const char*fromcode)
+  {
+    m_cd = iconv_open(tocode, fromcode);
+    return (iconv_t)-1 != m_cd;
+  }
+  UINT Convert(void*inbuf, size_t*pInLeft, void*outbuf, size_t outLeft)
+  {
+    char *in = (char*) inbuf, *out = (char*) outbuf;
+    size_t orgOutLeft = outLeft;
+    size_t ret = nsis_iconv_adaptor(iconv, *this, &in, pInLeft, &out, &outLeft);
+    if ((size_t)(-1) == ret) 
+      ret = 0, *pInLeft = 1;
+    else
+      ret = orgOutLeft - outLeft;
+    return ret;
+  }
+  iconv_t GetDescriptor() const { return m_cd; }
+  operator iconv_t() const { return m_cd; }
+
+  static const char* GetHostEndianUCS4Code() { return "UCS-4-INTERNAL"; }
+};
+
+TCHAR *CharPrev(const TCHAR *s, const TCHAR *p);
+char *CharNextA(const char *s);
+WCHAR *CharNextW(const WCHAR *s);
+char *CharNextExA(WORD codepage, const char *s, int flags);
+int wsprintf(TCHAR *s, const TCHAR *format, ...);
+int WideCharToMultiByte(UINT CodePage, DWORD dwFlags, LPCWSTR lpWideCharStr,
+    int cchWideChar, LPSTR lpMultiByteStr, int cbMultiByte, LPCSTR lpDefaultChar,
+    LPBOOL lpUsedDefaultChar);
+int MultiByteToWideChar(UINT CodePage, DWORD dwFlags, LPCSTR lpMultiByteStr,
+    int cbMultiByte, LPWSTR lpWideCharStr, int cchWideChar);
+BOOL IsValidCodePage(UINT CodePage);
+#ifdef _UNICODE
+#define CharNext CharNextW
+#else
+#define CharNext CharNextA
+#endif
+
+TCHAR *my_convert(const TCHAR *path);
+void my_convert_free(TCHAR *converted_path);
+int my_open(const TCHAR *pathname, int flags);
+
+#define OPEN(a, b) my_open(a, b)
+
+#else
+
+#define my_convert(x) (x)
+#define my_convert_free(x)
+
+#define OPEN(a, b) _topen(a, b)
+
+#endif
+
+FILE* my_fopen(const TCHAR *path, const char *mode);
+#define FOPEN(a, b) my_fopen((a), (b))
+
+// round a value up to be a multiple of 512
+// assumption: T is an int type
+template <class T>
+inline T align_to_512(const T x) {
+  return (x+511) & ~511;
+}
+
+// ================
+// ResourceManagers
+// ================
+
+// When a ResourceManager instance goes out of scope, it will run
+// _FREE_RESOURCE on the resource.
+// Example use:
+// int fd = open(..);
+// assert(fd != -1);
+// MANAGE_WITH(fd, close);
+
+class BaseResourceManager {
+protected:
+	BaseResourceManager() {}
+public:
+	virtual ~BaseResourceManager() {}
+};
+
+template <typename _RESOURCE, typename _FREE_RESOURCE>
+class ResourceManager : public BaseResourceManager {
+public:
+  ResourceManager(_RESOURCE& resource) : m_resource(resource) {}
+  virtual ~ResourceManager() { m_free_resource(m_resource); };
+private: // members
+  _RESOURCE& m_resource;
+  _FREE_RESOURCE m_free_resource;
+private: // don't copy instances
+  ResourceManager(const ResourceManager&);
+  void operator=(const ResourceManager&);
+};
+
+#define RM_MANGLE_FREEFUNC(freefunc) \
+	__free_with_##freefunc
+
+#define RM_DEFINE_FREEFUNC(freefunc) \
+struct RM_MANGLE_FREEFUNC(freefunc) { \
+  template <typename T> void operator()(T& x) { freefunc(x); } \
+}
+
+typedef boost::scoped_ptr<BaseResourceManager> ResourceManagerPtr;
+
+template<typename _FREE_RESOURCE, typename _RESOURCE>
+void createResourceManager(_RESOURCE& resource, ResourceManagerPtr& ptr) {
+	ptr.reset(new ResourceManager<_RESOURCE, _FREE_RESOURCE>(resource));
+}
+
+#define RM_MANGLE_RESOURCE(resource) resource##_autoManager
+#define MANAGE_WITH(resource, freefunc) \
+	ResourceManagerPtr RM_MANGLE_RESOURCE(resource); \
+		createResourceManager<RM_MANGLE_FREEFUNC(freefunc)>( \
+      resource, RM_MANGLE_RESOURCE(resource))
+
+// Add more resource-freeing functions here when you need them
+RM_DEFINE_FREEFUNC(close);
+RM_DEFINE_FREEFUNC(CloseHandle);
+RM_DEFINE_FREEFUNC(fclose);
+RM_DEFINE_FREEFUNC(free);
+RM_DEFINE_FREEFUNC(my_convert_free);
+
+// Auto path conversion
+#ifndef _WIN32
+#  define PATH_CONVERT(x) x = my_convert(x); MANAGE_WITH(x, my_convert_free);
+#else
+#  define PATH_CONVERT(x)
+#endif
+
+// Platform detection
+bool Platform_SupportsUTF8Conversion();
+
+#endif //_UTIL_H_
